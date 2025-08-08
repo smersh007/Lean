@@ -280,3 +280,7 @@ Research/Notebooks
 
 #Docker result files
 Results/
+*.bak
+/Algorithm.CSharp/BollingerMeanReversionAlgorithm - Copy.cs
+/Algorithm.CSharp/PinBallMarkovStrategy - Copy.cs
+/_Shortcuts

@@ -367,30 +367,41 @@ namespace QuantConnect.Algorithm.CSharp
             var dotPath = "transition.dot";
             var svgPath = "transition.svg";
 
+            // Semantic node palette (price region) - contrast tuned
             var regionColors = new Dictionary<string, string>
             {
-                { "L2", "darkgreen" },
-                { "L1", "mediumseagreen" },
-                { "M2", "darkmagenta" },
-                { "M1", "fuchsia" },
-                { "U1", "red" },
-                { "U2", "firebrick" }
+                { "L1", "#228822" },
+                { "L2", "#114411" },
+                { "M1", "#885588" },
+                { "M2", "#880088" },
+                { "U1", "#884444" },
+                { "U2", "#661111" },
             };
 
+            // Trend cluster fills (backgrounds) - slightly lighter for contrast
+            Func<string,string> clusterFill = grp => grp switch
+            {
+                "TrendUp"   => "#114C3D",
+                "TrendDown" => "#53202A",
+                "Flat"      => "#2E3552",
+                _           => "#1B1F2A"
+            };
 
             using (var writer = new StreamWriter(dotPath))
             {
                 writer.WriteLine("digraph MarkovTransitions {");
                 writer.WriteLine("  rankdir=LR;");
                 writer.WriteLine("  labelloc=\"t\";");
-                writer.WriteLine($"  label=\"PinBall Markov Transition Diagram ({_symbol}) {_startDate:yyyyMMdd}- {_endDate:yyyyMMdd}\"; fontcolor=white;");
-                writer.WriteLine("  bgcolor=grey16;");
-                writer.WriteLine("  edge [fontsize=9];");
-                writer.WriteLine("  node [shape=box, fontsize=10];");
+                writer.WriteLine($"  label=\"PinBall Markov Transition Diagram ({_symbol}) {_startDate:yyyy-MM-dd}- {_endDate:yyyy-MM-dd}\";");
+                writer.WriteLine("  fontcolor=\"#EAECEF\";");
+                writer.WriteLine("  bgcolor=\"#111418\";");
 
-                // Group states by region for clusters
+                // Global defaults
+                writer.WriteLine("  edge [fontsize=10, fontname=\"Segoe UI Bold\", fontcolor=\"#FFFFFF\", labelfontcolor=\"#FFFFFF\", arrowsize=0.9, arrowhead=vee];");
+                writer.WriteLine("  node [shape=box, fontsize=10, style=\"rounded,filled\", fontcolor=\"#FFFFFF\", penwidth=1.8, color=\"#B0BEC5\"];");
+
+                // Group states by trend regime for clusters
                 var nodeGroups = new Dictionary<string, List<string>>();
-
                 foreach (var from in tmx.Keys)
                 {
                     foreach (var to in tmx[from].Keys)
@@ -406,36 +417,28 @@ namespace QuantConnect.Algorithm.CSharp
                     }
                 }
 
-                // Write clusters
+                // Write clusters with new fills
                 foreach (var group in nodeGroups.Keys.OrderBy(k => k))
                 {
-                    // Use any color for the background (light shades work best)
-                    string fillColor = group switch
-                    {
-                        "TrendUp" => "aquamarine3",
-                        "TrendDown" => "lightcoral",
-                        "Flat" => "lavenderblush",
-                        _ => "white"
-                    };
+                    string fillColor = clusterFill(group);
 
                     writer.WriteLine($"  subgraph cluster_{group} {{");
                     writer.WriteLine($"    label = \"{group}\";");
                     writer.WriteLine($"    style=filled;");
-                    writer.WriteLine($"    color=gray;");
-                    writer.WriteLine($"    fillcolor={fillColor};");
+                    writer.WriteLine($"    color=\"#8C9BAA\";");
+                    writer.WriteLine($"    fillcolor=\"{fillColor}\";");
 
                     foreach (var node in nodeGroups[group])
                     {
                         var region = GetComponentFromState(node, 3); // L1, M1, etc.
-                        var nodeColor = regionColors.TryGetValue(region, out var c) ? c : "white";
-                        writer.WriteLine($"    \"{node}\" [style=filled, fillcolor={nodeColor}, fontcolor={"white"}];");
+                        var nodeColor = regionColors.TryGetValue(region, out var c) ? c : "#374151";
+                        writer.WriteLine($"    \"{node}\" [fillcolor=\"{nodeColor}\"];");
                     }
 
                     writer.WriteLine("  }");
                 }
 
-
-                // Write edges with color, style, and penwidth
+                // Edge styling by probability (color ramp + width + dashed for low p)
                 foreach (var from in tmx.Keys)
                 {
                     foreach (var to in tmx[from].Keys)
@@ -444,20 +447,20 @@ namespace QuantConnect.Algorithm.CSharp
                         if (double.IsNaN(prob) || double.IsInfinity(prob) || prob < transThreshold)
                             continue;
 
-                        string color = prob switch
-                        {
-                            >= 0.8 => "royalblue4",
-                            >= 0.6 => "teal",
-                            >= 0.4 => "lightsteelblue2",
-                            >= 0.2 => "steelblue",
-                            >= 0.1 => "white",
-                            _ => "grey"
-                        };
+                        string color =
+                            prob >= 0.80 ? "#64FFDA" :
+                            prob >= 0.60 ? "#4FC3F7" :
+                            prob >= 0.40 ? "#81D4FA" :
+                            prob >= 0.20 ? "#B3E5FC" :
+                            prob >= 0.10 ? "#CFD8DC" :
+                                           "#90A4AE";
 
-                        string style = prob < 0.2 ? "dashed" : "solid";
-                        double penWidth = 1.0 + prob * 4;
+                        string style = prob < 0.20 ? "dashed" : "solid";
+                        if (prob < 0.20) color = "#B0BEC5"; // lighter dashed edges for visibility
 
-                        writer.WriteLine($"  \"{from}\" -> \"{to}\" [label=\"{prob:F2}\", color={color}, style={style}, penwidth={penWidth:F1}];");
+                        double penWidth = Math.Min(1.0 + 5.0 * prob, 6.0);
+
+                        writer.WriteLine($"  \"{from}\" -> \"{to}\" [label=\"{prob:F2}\", color=\"{color}\", style={style}, penwidth={penWidth:F1}];");
                     }
                 }
 

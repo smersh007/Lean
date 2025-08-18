@@ -11,8 +11,11 @@ using Path = System.IO.Path;
 
 namespace QuantConnect.Algorithm.CSharp
 {
+
     public class PinBallMarkovStrategy : QCAlgorithm
     {
+        string symbolFolder = $"D:\\Dev\\StockData\\Symbols";
+
         private readonly Dictionary<string, int> _regionCodeMap = new()
             {
                 { "L2", 0 },
@@ -22,6 +25,7 @@ namespace QuantConnect.Algorithm.CSharp
                 { "U1", 4 },
                 { "U2", 5 }
             };
+
         private readonly double sigmas = 1.8;
         private List<string> _chartLog = new();
 
@@ -74,6 +78,8 @@ namespace QuantConnect.Algorithm.CSharp
 
         public override void Initialize()
         {
+            var leveraged = ReadFirstColumn(Path.Combine(symbolFolder, "LeveragedETFs.csv"));
+
             resultsFolder = Path.Combine(Environment.CurrentDirectory, "Results");
             Directory.CreateDirectory(resultsFolder);
 
@@ -569,6 +575,14 @@ namespace QuantConnect.Algorithm.CSharp
         private decimal GetZScoreUpperLT() => _emaLT.Current.Value + (decimal)sigmas * _stdDevLT.Current.Value;
         private decimal GetZScoreLowerLT() => _emaLT.Current.Value - (decimal)sigmas * _stdDevLT.Current.Value;
 
+
+        public static List<string> ReadFirstColumn(string path)
+        {
+            return File.ReadLines(path)
+                       .Where(line => !string.IsNullOrWhiteSpace(line))
+                       .Select(line => line.Split(',')[0].Trim())
+                       .ToList();
+        }
 
     }
 

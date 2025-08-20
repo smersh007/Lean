@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using QLNet;
 using QuantConnect;
 using QuantConnect.Algorithm;
 using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Indicators;
+using QuantConnect.Orders;
 using Path = System.IO.Path;
 
 namespace QuantConnect.Algorithm.CSharp
@@ -54,7 +56,7 @@ namespace QuantConnect.Algorithm.CSharp
 
         public override void Initialize()
         {
-            var tickers = ReadFirstColumn(Path.Combine(symbolFolder, "ETFsAll_Cleaned.csv"));
+            var tickers = ReadFirstColumn(Path.Combine(symbolFolder, _trainingMode ? "ETFsAll_Cleaned.csv" : "Test1.csv"));
             resultsFolder = Path.Combine(Environment.CurrentDirectory, "Results");
             Directory.CreateDirectory(resultsFolder);
 
@@ -81,7 +83,7 @@ namespace QuantConnect.Algorithm.CSharp
             foreach (var ticker in tickers)
             {
                 var symbol = AddEquity(ticker, Resolution.Daily).Symbol;
-                _symbols[symbol] = new SymbolData(symbol, this, _volLookback, sigmas);
+                _symbols[symbol] = new SymbolData(symbol, this, _volLookback);
 
                 var regionId = new Identity($"RegionCode_{symbol.Value}");
                 _regionPlots[symbol] = regionId;
@@ -112,11 +114,11 @@ namespace QuantConnect.Algorithm.CSharp
                     continue;
                 }
 
-                var priceNow = Securities[sym].Price;
+                var currentPx = Securities[sym].Price;
 
-                if (sd.Atr.IsReady && priceNow > 0)
+                if (sd.Atr.IsReady && currentPx > 0)
                 {
-                    var volPct = sd.Atr.Current.Value / priceNow;           // ATR / Price
+                    var volPct = sd.Atr.Current.Value / currentPx;           // ATR / Price
                     sd.VolSma.Update(Time, volPct);
                     sd.VolStd.Update(Time, volPct);
                 }
@@ -129,7 +131,7 @@ namespace QuantConnect.Algorithm.CSharp
 
                 //           Debug($"PriceRegion: {GetPriceRegion()}, Price: {Securities[_symbol].Price:F2}");
 
-                var priceRegion = GetPriceRegion(sym, sd);
+                var priceRegion = GetPriceRegion(sym, sd, currentPx);
                 if (_regionCodeMap.TryGetValue(priceRegion, out int value))
                     _regionPlots[sym].Update(Time, value);
 
@@ -171,15 +173,45 @@ namespace QuantConnect.Algorithm.CSharp
                 {
                     // --- Trading mode ---
                     if (tmx != null && tmx.TryGetValue(currentState, out Dictionary<string, double> transitions))
-                    {
-                        var bestTarget = transitions.OrderByDescending(x => x.Value).First().Key;
+                        if (Portfolio[sym].Invested)
+                        {
+                            if (Portfolio[sym].Quantity == 0)
+                            {
+                                sd.StopTicket?.Cancel();
+                                sd.TpTicket?.Cancel();
+                            }
+                        }
+                        else
+                        {
+                            var nextTransitions = transitions.Where(s => s.Key != currentState)
+                                .OrderByDescending(x => x.Value)
+                                .Where(s => s.Value > 0.25).ToList();
 
-                        var targetPrice = ResolvePriceLevel(bestTarget, sd);
-                        Debug($"From {currentState} → {bestTarget} → target price: {targetPrice:F2}");
+                            var bestTarget = nextTransitions.FirstOrDefault();
+                            if (bestTarget.Key != null)
+                            {
+                                var targetPrice = ResolveRegionAnchor(bestTarget.Key, sd);
+                                var currentPrice = Securities[sym].Price;
 
-                        // Example action placeholder:
-                        // PlaceLimitOrder(_symbol, quantity, targetPrice);
-                    }
+                                if (targetPrice > currentPrice)
+                                {
+                                    Debug($"From {currentState} Current Px:{currentPrice} → {bestTarget} → Target Px: {targetPrice:F2}");
+
+                                    var riskPerShare = 2m * (decimal)sd.Atr.Current.Value;                 // $/share
+                                    var dollarRisk = 0.01m * Portfolio.Cash;                             // 1% per trade
+                                    var rawQty = dollarRisk / riskPerShare;                          // shares
+                                    var cashCapQty = Portfolio.Cash / (decimal)currentPrice;                    // don’t exceed cash
+                                    var qty = (int)Math.Max(1, Math.Min(rawQty, cashCapQty));     // clamp to cash & >=1
+
+
+                                    sd.EntryTicket = LimitOrder(sym, qty, (decimal)currentPrice); // marketable limit at current price
+
+                                    sd.TargetPrice = targetPrice;
+                                }
+                            }
+
+                        }
+
                 }
             }
         }
@@ -195,6 +227,7 @@ namespace QuantConnect.Algorithm.CSharp
                 var tmxAll = MakeTransitionMatrix(allTransitions);
                 PlotTransitions(tmxAll, transitionPlotThreshold);
 
+                var show_more = false;
                 // Per-symbol region tracking CSVs
                 foreach (var sd in _symbols.Values)
                 {
@@ -202,12 +235,13 @@ namespace QuantConnect.Algorithm.CSharp
                     File.WriteAllLines(path,
                         new[] { "Date,Price,Region,RegionCode,VolRegime,ZScoreL_ST,ZScoreU_ST,ZScoreL_LT,ZScoreU_LT" }
                         .Concat(sd.ChartLog));
+
+                    if (show_more)
+                        Open(path);
                 }
 
-
-                //             Open(regionTrackingPath);
-
-                //              Open(transitionPath);
+                if (show_more)
+                    Open(transitionPath);
 
             }
         }
@@ -433,20 +467,16 @@ namespace QuantConnect.Algorithm.CSharp
             return (index >= 0 && index < parts.Length) ? parts[index] : "Unknown";
         }
 
-        private string GetPriceRegion(Symbol sym, SymbolData sd)
+        private string GetPriceRegion(Symbol sym, SymbolData sd, decimal price)
         {
-            var price = Securities[sym].Price;
-            var emaST = sd.EmaST.Current.Value;
-            var zL_ST = emaST - (decimal)sigmas * sd.StdDevST.Current.Value;
-            var zU_ST = emaST + (decimal)sigmas * sd.StdDevST.Current.Value;
-            var zL_LT = sd.EmaLT.Current.Value - (decimal)sigmas * sd.StdDevLT.Current.Value;
-            var zU_LT = sd.EmaLT.Current.Value + (decimal)sigmas * sd.StdDevLT.Current.Value;
+            if (!sd.EmaST.IsReady || !sd.EmaLT.IsReady || !sd.StdDevST.IsReady || !sd.StdDevLT.IsReady)
+                return "Unknown"; // avoid classifying before indicators are warm
 
-            if (price < zL_LT) return "L2";
-            if (price < zL_ST) return "L1";
-            if (price < emaST) return "M2";
-            if (price < zU_ST) return "M1";
-            if (price < zU_LT) return "U1";
+            if (price < GetZScoreLowerLT(sd)) return "L2";
+            if (price < GetZScoreLowerST(sd)) return "L1";
+            if (price < GetEmaLT(sd)) return "M2";
+            if (price < GetEmaST(sd)) return "M1";
+            if (price < GetZScoreUpperLT(sd)) return "U1";
             return "U2";
         }
 
@@ -470,35 +500,49 @@ namespace QuantConnect.Algorithm.CSharp
                  : "VolMed";
         }
 
-        private decimal ResolvePriceLevel(string state, SymbolData sd)
+        private decimal ResolveRegionAnchor(string state, SymbolData sd)
         {
-            return state switch
+            var region = GetRegionFromState(state);
+            return region switch
             {
-                "ZScoreU_ST" => GetZScoreUpperST(sd),
-                "ZScoreL_ST" => GetZScoreLowerST(sd),
-                "EMA_ST" => sd.EmaST.Current.Value,
-                "EMA_LT" => sd.EmaLT.Current.Value,
-                _ => 0,
+                "L2" => GetZScoreLowerLT(sd),
+                "L1" => GetZScoreLowerST(sd),
+                "M2" => GetEmaLT(sd),
+                "M1" => GetEmaST(sd),
+                "U1" => GetZScoreUpperST(sd),
+                "U2" => GetZScoreUpperLT(sd),
+                _ => 0 // error!
             };
         }
+        private static string GetRegionFromState(string state) => GetComponentFromState(state, 2);  // 0=Trend, 1=Vol, 2=Region
+
+        private decimal GetEmaST(SymbolData sd)
+        {
+            return sd.EmaST.Current.Value;
+        }
+        private decimal GetEmaLT(SymbolData sd)
+        {
+            return sd.EmaLT.Current.Value;
+        }
+
         private decimal GetZScoreUpperST(SymbolData sd)
         {
-            return sd.EmaST.Current.Value + (decimal)sigmas * sd.StdDevST.Current.Value;
+            return GetEmaST(sd) + (decimal)sigmas * sd.StdDevST.Current.Value;
         }
 
         private decimal GetZScoreLowerST(SymbolData sd)
         {
-            return sd.EmaST.Current.Value - (decimal)sigmas * sd.StdDevST.Current.Value;
+            return GetEmaST(sd) - (decimal)sigmas * sd.StdDevST.Current.Value;
         }
 
         private decimal GetZScoreUpperLT(SymbolData sd)
         {
-            return sd.EmaLT.Current.Value + (decimal)sigmas * sd.StdDevLT.Current.Value;
+            return GetEmaLT(sd) + (decimal)sigmas * sd.StdDevLT.Current.Value;
         }
 
         private decimal GetZScoreLowerLT(SymbolData sd)
         {
-            return sd.EmaLT.Current.Value - (decimal)sigmas * sd.StdDevLT.Current.Value;
+            return GetEmaLT(sd) - (decimal)sigmas * sd.StdDevLT.Current.Value;
         }
 
         public static List<string> ReadFirstColumn(string path)
@@ -525,8 +569,13 @@ namespace QuantConnect.Algorithm.CSharp
             public string PreviousState { get; set; }
             public List<string> ChartLog { get; } = new();
             public Dictionary<(string from, string to), int> Transitions { get; } = new();
+            public OrderTicket EntryTicket { get; set; }
+            public OrderTicket StopTicket { get; set; }
+            public OrderTicket TpTicket { get; set; }
+            public decimal? EntryFillPrice { get; set; }    // cached when entry fills
+            public decimal TargetPrice { get; set; }
 
-            public SymbolData(Symbol symbol, QCAlgorithm algo, int volLookback, double sigmas)
+            public SymbolData(Symbol symbol, QCAlgorithm algo, int volLookback)
             {
                 Symbol = symbol;
                 Atr = algo.ATR(symbol, 14, MovingAverageType.Wilders, Resolution.Daily);
@@ -541,9 +590,102 @@ namespace QuantConnect.Algorithm.CSharp
                 XDur = new CrossDurationBucketIndicator($"XDur_{symbol.Value}", EmaST, EmaLT, 0m);
                 algo.RegisterIndicator(symbol, XDur, Resolution.Daily);
             }
+
+
         }
 
+
+
+
+        // Choose a target based on probability-weighted, ATR-adjusted expectancy
+        private decimal ChooseBestTarget(Symbol sym, SymbolData sd, decimal currentPrice, IEnumerable<(decimal targetPrice, double probability)> candidates, double minProb = 0.25)
+        {
+            if (sd?.Atr == null || !sd.Atr.IsReady) return 0m;
+
+            var scored = candidates
+                .Where(c => c.probability >= minProb)
+                .Select(c =>
+                {
+                    var expDollars = c.targetPrice - currentPrice;
+                    var atrDollars = (decimal)sd.Atr.Current.Value;
+                    var score = (double)(expDollars / atrDollars) * c.probability;
+                    return (c.targetPrice, c.probability, expDollars, score);
+                })
+                .Where(x => x.expDollars > 0m)
+                .OrderByDescending(x => x.score)
+                .ToList();
+
+            return scored.Count == 0 ? 0m : scored[0].targetPrice;
+        }
+
+        // Place a long entry with bracket exits (stop + two take-profits)
+
+        // ===================== Order Management =====================
+
+        public override void OnOrderEvent(OrderEvent orderEvent)
+        {
+            if (!orderEvent.Status.IsFill()) return;
+
+            var sym = orderEvent.Symbol;
+            if (!_symbols.TryGetValue(sym, out var sd) || sd == null) return;
+
+            StringBuilder msg = new();
+
+            if (orderEvent.Ticket != null)
+            {
+                msg.Append($"Order Event {orderEvent.Status} {orderEvent.Ticket.OrderType}  OrderId:{orderEvent.Ticket.OrderId} Px:{orderEvent.Ticket.AverageFillPrice} Qty:{orderEvent.Quantity}");
+
+                if (orderEvent.Ticket.OrderId == sd.EntryTicket?.OrderId) // Entry filled → place stop + single TP
+                {
+                    msg.Append($" - Ent");
+
+                    var filledQty = orderEvent.Ticket.QuantityFilled;
+                    if (filledQty <= 0) return;
+
+                    var avgFill = orderEvent.Ticket.AverageFillPrice;
+                    var atrDollars = (decimal)sd.Atr.Current.Value;
+
+                    // Stop below fill
+                    var stopPrice = avgFill - 2m * atrDollars;
+
+                    // Take-profit at planned target
+                    var tpPrice = sd.TargetPrice;
+
+                    sd.StopTicket = StopMarketOrder(sym, -filledQty, stopPrice);
+                    sd.TpTicket = LimitOrder(sym, -filledQty, tpPrice);
+
+
+                }
+                else
+                {
+                    // Take-profit or stop filled → cleanup
+                    if (orderEvent.Ticket.OrderId == sd.TpTicket?.OrderId)
+                    {
+                        msg.Append($" - TP");
+                        if (Portfolio[sym].Quantity == 0)
+                            sd.StopTicket?.Cancel();
+                    }
+                    if(orderEvent.Ticket.OrderId == sd.StopTicket?.OrderId)
+                    {
+                        msg.Append($" - SL");
+                        if (Portfolio[sym].Quantity == 0)
+                            sd.TpTicket?.Cancel();
+                    }
+                }
+                Debug(msg.ToString());
+            }
+        }
+
+
+
+
+
+
+
+
     }
+
+
     public class CrossDurationBucketIndicator : IndicatorBase<IndicatorDataPoint>
     {
         private readonly Indicator _emaST;

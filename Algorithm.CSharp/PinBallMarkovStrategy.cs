@@ -37,7 +37,7 @@ namespace QuantConnect.Algorithm.CSharp
         private string transitionFileName = $"_PinBall_Transitions.csv";
         private const string regionTrackingFileName = "region_tracking.csv";
         private const double transitionPlotThreshold = 0.25;
-        private const double minTrasitionProbability = 0.4;
+        private const double minTrasitionProbability = 0.3;
         private string resultsFolder;
         private string transitionPath;
 
@@ -63,6 +63,11 @@ namespace QuantConnect.Algorithm.CSharp
         public override void Initialize()
         {
             var tickers = ReadFirstColumn(Path.Combine(symbolFolder, _trainingMode ? "ETFsAll_Cleaned.csv" : "Test1.csv"));
+            var excludedTickers = ReadFirstColumn(Path.Combine(symbolFolder, "LeveragedETFs.csv"));
+            var bannedTickers = ReadFirstColumn(Path.Combine(symbolFolder, "Banned.csv"));
+
+            tickers = tickers.Where(t => !bannedTickers.Contains(t)).ToList();
+            tickers = tickers.Where(t => !excludedTickers.Contains(t)).ToList();
 
             resultsFolder = Path.Combine(Environment.CurrentDirectory, "Results");
             Directory.CreateDirectory(resultsFolder);
@@ -132,11 +137,11 @@ namespace QuantConnect.Algorithm.CSharp
 
                 if (!sd.Atr.IsReady || !sd.VolSma.IsReady || !sd.VolStd.IsReady)
                 {
-                    Debug(sym.Value, $"vol stats warming up ATR:{sd.Atr.IsReady} SMA:{sd.VolSma.IsReady} STD:{sd.VolStd.IsReady}");
+                    Debug(sym.Value, $"Indicators warming up ATR:{sd.Atr.IsReady} SMA:{sd.VolSma.IsReady} STD:{sd.VolStd.IsReady}");
                     continue;
                 }
 
-                //           Debug($"PriceRegion: {GetPriceRegion()}, Price: {Securities[_symbol].Price:F2}");
+      //     Debug($"PriceRegion: {GetPriceRegion()}, Price: {Securities[_symbol].Price:F2}");
 
 
                 string trendLabel = sd.XDur.GetStateLabel();
@@ -189,31 +194,49 @@ namespace QuantConnect.Algorithm.CSharp
                                     if (targetPrice < 0)
                                     {
                                         Debug(sym, "Error with target price");
-
                                     }
 
                                     if (targetPrice > currentPrice)
                                     {
-                                        Debug(sym, $"From {currentState} Current Px:{currentPrice} → Trans:{trans} → Target Px: {targetPrice:F2}");
-
-                                        var atrRiskPerUnit = 2m * (decimal)sd.Atr.Current.Value;                 // $/share
-                                        var rewardToRisk = (targetPrice - currentPrice) / atrRiskPerUnit;
+                                        decimal atrRiskPerUnit = 2m * (decimal)sd.Atr.Current.Value;                 // $/share
+                                        decimal reward = targetPrice - currentPrice;
+                                        decimal priceMove = targetPrice / currentPrice;
+                                        decimal rewardToRisk = reward / atrRiskPerUnit;
 
                                         if (rewardToRisk > 1.99m)
                                         {
-                                            var maxDollarRisk = 0.01m * NotionalAccountSize;                             // 1% per trade
-                                            var qty = maxDollarRisk / atrRiskPerUnit;                          // shares
-                                                                                                               //   var cashCapQty = Portfolio.Cash / (decimal)currentPrice;                    // don’t exceed cash
+                                            decimal maxDollarRisk = 0.01m * NotionalAccountSize;                             // 1% per trade
+                                            decimal qty = maxDollarRisk / atrRiskPerUnit;                          // shares
+                                            qty = qty < 1 ? 1 : qty;
+                                            qty = (int)qty;
 
+                                            //   var cashCapQty = Portfolio.Cash / (decimal)currentPrice;                    // don’t exceed cash
+                                            decimal tradeValue = qty * (decimal)currentPrice;
+                                            decimal dollarRisk = qty * atrRiskPerUnit;
 
-                                            var tradeValue = qty * (decimal)currentPrice;
-                                            var dollarRisk = qty * atrRiskPerUnit;
+                                            decimal maxTradeValue = 0.1m * NotionalAccountSize;
 
-                                            sd.EntryTicket = LimitOrder(sym, qty, (decimal)currentPrice); // marketable limit at current price
+                                            if (tradeValue >  maxTradeValue)
+                                            {
+                                                qty = qty * maxTradeValue / tradeValue;
+                                                tradeValue = qty * (decimal)currentPrice;
+                                                dollarRisk = qty * atrRiskPerUnit;
+                                                qty = qty < 1 ? 1 : qty;
+                                                qty = (int)qty;
+                                            }
 
-                                            sd.TargetPrice = targetPrice;
+                                            if (tradeValue <= 1.05m * maxTradeValue)
+                                            {
 
-                                            break; // only take the first valid transition
+                                                Debug(sym, $"From {currentState} Current Px:{currentPrice:F3} → Trans:{trans} → Target Px: {targetPrice:F3} Qty: {qty:F2} Value: {tradeValue:F1} RewardToRisk: {rewardToRisk:F2}");
+
+                                                sd.EntryTicket = LimitOrder(sym, qty, (decimal)currentPrice); // marketable limit at current price
+
+                                                sd.TargetPrice = targetPrice;
+
+                                                break; // only take the first valid transition
+                                            }
+                                            else { }
                                         }
                                     }
                                 }
@@ -504,8 +527,8 @@ namespace QuantConnect.Algorithm.CSharp
             if (parts.Length < 3)
                 return -1;
 
-            var zoneStateST = parts[2]; // e.g., "Z1U", "Z0D"
-            var zoneStateLT = parts[3]; // e.g., "Z2U", "Z0D"
+            var zoneStateLT = parts[2]; // e.g., "Z2U", "Z0D"
+            var zoneStateST = parts[3]; // e.g., "Z1U", "Z0D"
 
             (int zone, char dir) ParseZoneState(string z)
             {
@@ -533,20 +556,21 @@ namespace QuantConnect.Algorithm.CSharp
             try
             {
 
-                var st = ParseZoneState(zoneStateST);
                 var lt = ParseZoneState(zoneStateLT);
+                var st = ParseZoneState(zoneStateST);
 
-                var sigmaST = GetZoneSigma(sd, st);
-                var pxST = st.dir == 'U'
-                    ? GetZScoreUpperST(sd, (double)sigmaST)
-                    : GetZScoreLowerST(sd, (double)sigmaST);
-
-                decimal sigmaLT = GetZoneSigma(sd, lt);
+                decimal sigmaLT = GetZoneSigma(sd, lt.zone);
                 var pxLT = st.dir == 'U'
                     ? GetZScoreUpperLT(sd, (double)sigmaLT)
                     : GetZScoreLowerLT(sd, (double)sigmaLT);
 
-                return (pxST + pxLT) / 2;
+                var sigmaST = GetZoneSigma(sd, st.zone);
+                var pxST = st.dir == 'U'
+                    ? GetZScoreUpperST(sd, (double)sigmaST)
+                    : GetZScoreLowerST(sd, (double)sigmaST);
+
+
+                return (pxLT + pxST) / 2;
             }
             catch (Exception ex)
             {
@@ -554,11 +578,11 @@ namespace QuantConnect.Algorithm.CSharp
                 throw;
             }
 
-            static decimal GetZoneSigma(SymbolData sd, (int zone, char dir) lt)
+            static decimal GetZoneSigma(SymbolData sd, int zoneIndex)
             {
-                return lt.zone == 0 ? sd.ZoneSigmas[lt.zone] / 2
-                    : lt.zone >= sd.ZoneSigmas.Count ? sd.ZoneSigmas[lt.zone - 1]
-                    : (sd.ZoneSigmas[lt.zone - 1] + sd.ZoneSigmas[lt.zone]) / 2;
+                return zoneIndex == 0 ? sd.ZoneSigmas[zoneIndex] / 2
+                    : zoneIndex >= sd.ZoneSigmas.Count ? sd.ZoneSigmas[zoneIndex - 1]
+                    : (sd.ZoneSigmas[zoneIndex - 1] + sd.ZoneSigmas[zoneIndex]) / 2;
             }
         }
 
@@ -571,8 +595,8 @@ namespace QuantConnect.Algorithm.CSharp
         private static string GetZoneStates(SymbolData sd, decimal px)
         {
             return
-                GetZone(sd.EmaST.Current.Value, sd.StdDevST.Current.Value, px, sd)
-            + "_" + GetZone(sd.EmaLT.Current.Value, sd.StdDevLT.Current.Value, px, sd);
+                GetZone(sd.EmaLT.Current.Value, sd.StdDevLT.Current.Value, px, sd)// LT
+            + "_" + GetZone(sd.EmaST.Current.Value, sd.StdDevST.Current.Value, px, sd);// ST
         }
 
         private static string GetZone(decimal ema, decimal sdev, decimal price, SymbolData sd)

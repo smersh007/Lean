@@ -56,6 +56,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "QuantConnect.Optimizer.Laun
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "QuantConnect.DownloaderDataProvider.Launcher", "DownloaderDataProvider\QuantConnect.DownloaderDataProvider.Launcher.csproj", "{D139191E-50D5-4284-AC9C-247ED60950F4}"
 EndProject
+Project("{888888A0-9F3D-457C-B088-3A5042F75D52}") = "PlotResults", "PlotResults\PlotResults.pyproj", "{CDCCC6B2-B9E8-4899-96B3-651DB086AAB5}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -152,6 +154,8 @@ Global
 		{D139191E-50D5-4284-AC9C-247ED60950F4}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D139191E-50D5-4284-AC9C-247ED60950F4}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D139191E-50D5-4284-AC9C-247ED60950F4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CDCCC6B2-B9E8-4899-96B3-651DB086AAB5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CDCCC6B2-B9E8-4899-96B3-651DB086AAB5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -532,6 +532,8 @@ namespace QuantConnect.Lean.Engine
                 {
                     if (timeSlice.Slice.HasData)
                     {
+                        if(algorithm.CurrentSlice.Time.Date == new DateTime(2023,11,15))
+                        { }
                         // EVENT HANDLER v3.0 -- all data in a single event
                         algorithm.OnData(algorithm.CurrentSlice);
                     }
